@@ -8,7 +8,7 @@ import comfy.lora_convert
 import comfy.model_patcher
 
 # Import custom implementations
-from ..weight_adapter.load_lora import load_lora, model_lora_keys_unet, model_lora_keys_clip
+from ..module.load_lora import load_lora, model_lora_keys_unet, model_lora_keys_clip
 
 logger = logging.getLogger(__name__)
 
