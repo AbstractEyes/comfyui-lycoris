@@ -15,6 +15,9 @@ ___
 * * glora - untested, unlikely to need runtime computation.
 * * blora - untested, uncertain if it requires runtime computation.
 
+![image](https://github.com/user-attachments/assets/08e1fea1-73de-4586-978d-34569f18666a)
+
+
 # Usage
 ___
 * LoadLycorisNode: This node is used to load the LYCORIS modules into the ComfyUI structure.
