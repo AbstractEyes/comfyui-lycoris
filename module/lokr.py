@@ -14,11 +14,14 @@ class LoKrAdapter(WeightAdapterBase):
     @classmethod
     def is_applicable(cls, lora_key: str, lora: dict[str, torch.Tensor]) -> bool:
         """Check if this is a LoKr layer"""
-        return any(f"{lora_key}.{k}" in lora for k in ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w2_a"])
+        return any(f"{lora_key}.{k}" in lora for k in ["lokr_w1", "lokr_w2", "lokr_w1_a", "lokr_w2_a", "lokr_w1_b", "lokr_w2_b", "lokr_t2"])
 
     @classmethod
-    def extract_weight(cls, lora_key: str, lora: dict[str, torch.Tensor],
-                       alpha: Optional[float], loaded_keys: set[str]) -> Optional[torch.Tensor]:
+    def extract_weight(cls,
+                       lora_key: str,
+                       lora: dict[str, torch.Tensor],
+                       alpha: Optional[float], # the comfyui set alpha is used to scale the LOKR along with it's internal alpha.
+                       loaded_keys: set[str]) -> Optional[torch.Tensor]:
         """Extract and reconstruct LoKr weight"""
         # Component names
         lokr_w1_name = f"{lora_key}.lokr_w1"
@@ -39,7 +42,12 @@ class LoKrAdapter(WeightAdapterBase):
         t2 = lora.get(lokr_t2_name)
 
         # Check if we have any LoKr components
-        if not any([w1, w2, w1_a, w2_a]):
+        check = False
+        for tensor in [w1, w2, w1_a, w2_a]:
+            if tensor is not None:
+                check = True
+                break
+        if check == False:
             return None
 
         # Track loaded keys
@@ -71,7 +79,7 @@ class LoKrAdapter(WeightAdapterBase):
                         w2 = torch.einsum('i j k l, j r, i p -> p r k l', t2, w2_b, w2_a)
 
                 # Compute Kronecker product
-                return make_kron(w1, w2, scale)
+                return make_kron(w1, w2)
 
             # Prepare tensors for CUDA computation
             tensors = []

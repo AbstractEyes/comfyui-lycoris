@@ -74,7 +74,12 @@ class LycorisLoaderNode:
             }
         }
 
-    def load_lycoris(self, model, clip, lora_name, strength_model, strength_clip):
+    def load_lycoris(self,
+                     model,
+                     clip,
+                     lora_name,
+                     strength_model,
+                     strength_clip):
         if strength_model == 0 and strength_clip == 0:
             return (model, clip)
 
