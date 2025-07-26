@@ -12,8 +12,14 @@ from ..module.load_lora import load_lora, model_lora_keys_unet, model_lora_keys_
 
 logger = logging.getLogger(__name__)
 
+DTYPES = {
+    "float16": torch.float16,
+    "bfloat16": torch.bfloat16,
+    "float32": torch.float32,
+}
 
-def load_lora_with_metadata(lora_path):
+
+def load_lora_with_metadata(lora_path, dtype="float16"):
     """
     Load a LoRA/LyCORIS file and preserve its metadata through conversion.
     Returns:
@@ -24,6 +30,10 @@ def load_lora_with_metadata(lora_path):
 
     # Load the file
     lora_data = comfy.utils.load_torch_file(lora_path, safe_load=True)
+    # convert the dtype
+    for key, value in lora_data.items():
+        if isinstance(value, torch.Tensor):
+            lora_data[key] = value.to(DTYPES.get(dtype, torch.float16))
     metadata = {}
 
     # Extract metadata from safetensors
@@ -75,6 +85,8 @@ class LycorisLoaderNode:
             "optional": {
                 "lycoris_type": (["any", "LoHA", "LoKr", "LoCon", "LyCORIS"], {"default": "any",
                                                                        "tooltip": "Force a specific LyCORIS type. 'Any' will try to detect automatically."}),
+                "dtype": (["float16", "bfloat16", "float32"], {"default": "float16",
+                                                               "tooltip": "Data type for the loaded models. 'float16' is recommended for most GPUs."}),
             }
         }
 
@@ -84,7 +96,8 @@ class LycorisLoaderNode:
                      lora_name,
                      strength_model,
                      strength_clip,
-                     lycoris_type="any"):
+                     lycoris_type="any",
+                     dtype="float16"):
         if strength_model == 0 and strength_clip == 0:
             return (model, clip)
 
@@ -95,7 +108,7 @@ class LycorisLoaderNode:
 
         try:
             # Use our new loader function
-            lora_data, metadata = load_lora_with_metadata(lora_path)
+            lora_data, metadata = load_lora_with_metadata(lora_path, dtype=dtype)
             # Build key map
             key_map = {}
             if model is not None and strength_model != 0:
