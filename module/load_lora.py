@@ -2,9 +2,15 @@ import logging
 import json
 from . import adapters
 
+from comfy import model_management  # ← Added for safe interrupt handling
+
+import time
+import re
+from comfy.utils import ProgressBar
+
 logger = logging.getLogger(__name__)
 
-# These are copies from ComfyUI's lora module that we need
+# Common LoRA CLIP key map used for model_lora_keys_clip
 LORA_CLIP_MAP = {
     "mlp.fc1": "mlp_fc1",
     "mlp.fc2": "mlp_fc2",
@@ -14,11 +20,9 @@ LORA_CLIP_MAP = {
     "self_attn.out_proj": "self_attn_out_proj",
 }
 
-
-def load_lora(lora, to_load, log_missing=True):
+def load_lora(lora, to_load, log_missing=True, model_type_assumption="lokr"):
     """
     Custom load_lora that uses the enhanced adapter system.
-
     Args:
         lora: Dictionary containing the lora weights
         to_load: Dictionary mapping lora_key -> model_key
@@ -28,128 +32,107 @@ def load_lora(lora, to_load, log_missing=True):
         Dictionary of patches in format {model_key: patch_data}
         where patch_data is ("diff", (tensor,)) or ("dora", (diff, scale))
     """
-    import time
     start_time = time.time()
-
-    logger.info(f"Starting load_lora with {len(to_load)} layers to process")
-
     patch_dict = {}
     loaded_keys = set()
 
-    # Check for network args in metadata
+    # Metadata detection
     network_args = None
+    ostris_mode = False
+
     if hasattr(lora, 'metadata') and isinstance(lora.metadata, dict):
-        algo = lora.metadata.get("ss_network_args", "")
+        meta = lora.metadata
+        algo = meta.get("ss_network_args", "")
         if isinstance(algo, str) and algo.strip().startswith("{"):
             try:
                 network_args = json.loads(algo)
                 logger.info(f"[load_lora] Network args: {network_args}")
             except json.JSONDecodeError as e:
                 logger.warning(f"[load_lora] Failed to parse ss_network_args: {e}")
+        if "software" in meta and "ai-toolkit" in str(meta.get("software")):
+            ostris_mode = True
+            logger.warning("[load_lora] Detected ai-toolkit model (OSTRIS). Enabling ostris_fallback mode.")
 
-    # Debug adapter registration
-    logger.info(f"Available adapters: {[a.name for a in adapters]}")
+    # Patch: fallback for ostris-trained lycoris blocks
+    if ostris_mode:
+        for key in lora.keys():
+            m = re.match(r"(lycoris_blocks_\d+_[a-z0-9_]+)\.lokr_w\d", key)
+            if m:
+                base = m.group(1)
+                if base not in to_load:
+                    model_key = f"diffusion_model.{base}.weight"
+                    to_load[base] = model_key
+                    logger.debug(f"[load_lora] Added fallback mapping: {base} -> {model_key}")
 
-    # Process each lora key
-    processed = 0
-    for lora_key in to_load:
-        processed += 1
-        if processed % 100 == 0:
-            logger.info(f"Processed {processed}/{len(to_load)} layers...")
+    logger.info(f"Starting load_lora with {len(to_load)} layers to process")
+    pbar = ProgressBar(len(to_load))
+
+    # Adapter loop
+    for i, lora_key in enumerate(to_load):
+        model_management.throw_exception_if_processing_interrupted()
+        pbar.update_absolute(i)
 
         model_key = to_load[lora_key]
 
-        # Extract alpha value if present
         alpha = lora.get(f"{lora_key}.alpha", None)
         if alpha is not None:
             alpha = alpha.item()
             loaded_keys.add(f"{lora_key}.alpha")
 
-        # Extract dora_scale if present
         dora_scale = lora.get(f"{lora_key}.dora_scale", None)
         if dora_scale is not None:
             loaded_keys.add(f"{lora_key}.dora_scale")
 
-        # Try to load with adapters
+        # Adapter override detection
         adapter_result = None
-
-        # Check for specific adapter from metadata
         adapter_override = None
         if network_args:
             algo_name = network_args.get("algo", "").strip().lower()
-            #logger.info(f"Looking for adapter '{algo_name}' from metadata")
-            adapter_override = next(
-                (a for a in adapters if a.name == algo_name),
-                None
-            )
-            #if adapter_override:
-            #    logger.info(f"Found adapter from metadata: {algo_name}")
-            #else:
-            #    logger.warning(f"Adapter '{algo_name}' not found in registered adapters")
+            adapter_override = next((a for a in adapters if a.name == algo_name), None)
 
-        # Try specific adapter first, then all adapters
         if adapter_override:
-            layer_start = time.time()
             adapter_result = adapter_override.load(lora_key, lora, alpha, dora_scale, loaded_keys)
-            layer_time = time.time() - layer_start
-            if adapter_result:
-                if layer_time > 0.05:
-                    logger.info(f"Layer {lora_key} -> {adapter_override.name} (metadata) ({layer_time:.2f}s)")
         else:
             for adapter_cls in adapters:
                 if adapter_cls.is_applicable(lora_key, lora):
-                    layer_start = time.time()
                     adapter_result = adapter_cls.load(lora_key, lora, alpha, dora_scale, loaded_keys)
-                    layer_time = time.time() - layer_start
                     if adapter_result:
-                        if layer_time > 0.05:
-                            logger.info(f"Layer {lora_key} -> {adapter_cls.name} ({layer_time:.2f}s)")
                         break
 
         if adapter_result:
-            # Adapter returns pre-calculated patches in ComfyUI format
             patch_type, patch_data = adapter_result
 
-            # Check if we need to reshape for conv layers
+            # Patch for Conv2d reshaping
             if patch_type == "diff" and len(patch_data) == 1:
                 diff_tensor = patch_data[0]
                 if model_key.endswith(".weight") and diff_tensor.dim() == 2:
-                    # Likely a conv weight that needs reshaping
-                    # Try common conv shapes
                     if "skip_connection" in model_key or "op" in model_key:
-                        # 1x1 conv
                         out_ch = diff_tensor.shape[0]
                         in_ch = diff_tensor.shape[1]
                         diff_tensor = diff_tensor.reshape(out_ch, in_ch, 1, 1)
                     elif "in_layers.2" in model_key or "out_layers.3" in model_key:
-                        # 3x3 conv
                         out_ch = diff_tensor.shape[0]
-                        total_in = diff_tensor.shape[1]
-                        kernel_size = int((total_in / out_ch) ** 0.5)
-                        if kernel_size * kernel_size * out_ch == total_in:
-                            in_ch = out_ch
-                        else:
-                            in_ch = total_in // 9
-                            kernel_size = 3
+                        in_ch = diff_tensor.shape[1]
+                        kernel_size = 3
                         diff_tensor = diff_tensor.reshape(out_ch, in_ch, kernel_size, kernel_size)
-
                     adapter_result = (patch_type, (diff_tensor,))
 
             patch_dict[model_key] = adapter_result
 
-        # Handle standard ComfyUI weight types
+        # Fallback: classic weight types
         for suffix in ("w_norm", "b_norm", "diff", "diff_b", "set_weight"):
             name = f"{lora_key}.{suffix}"
             val = lora.get(name, None)
             if val is not None:
                 loaded_keys.add(name)
-                if suffix == "b_norm" or suffix == "diff_b":
+                if suffix in {"b_norm", "diff_b"}:
                     patch_dict[model_key.replace(".weight", ".bias")] = ("diff", (val,))
                 elif suffix == "set_weight":
                     patch_dict[model_key] = ("set", (val,))
                 else:
                     patch_dict[model_key] = ("diff", (val,))
 
+    # Missing keys report
     if log_missing:
         for k in lora:
             if k not in loaded_keys:
@@ -157,7 +140,6 @@ def load_lora(lora, to_load, log_missing=True):
 
     elapsed = time.time() - start_time
     logger.info(f"load_lora completed in {elapsed:.2f}s - {len(patch_dict)} patches created")
-
     return patch_dict
 
 

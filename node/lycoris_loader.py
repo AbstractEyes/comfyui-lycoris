@@ -71,6 +71,10 @@ class LycorisLoaderNode:
                 "lora_name": (folder_paths.get_filename_list("loras"),),
                 "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
                 "strength_clip": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+            },
+            "optional": {
+                "lycoris_type": (["any", "LoHA", "LoKr", "LoCon", "LyCORIS"], {"default": "any",
+                                                                       "tooltip": "Force a specific LyCORIS type. 'Any' will try to detect automatically."}),
             }
         }
 
@@ -79,7 +83,8 @@ class LycorisLoaderNode:
                      clip,
                      lora_name,
                      strength_model,
-                     strength_clip):
+                     strength_clip,
+                     lycoris_type="any"):
         if strength_model == 0 and strength_clip == 0:
             return (model, clip)
 
@@ -99,7 +104,7 @@ class LycorisLoaderNode:
                 key_map = model_lora_keys_clip(clip.cond_stage_model, key_map)
 
             # Load patches - lora_data now has metadata attached
-            loaded = load_lora(lora_data, key_map)
+            loaded = load_lora(lora_data, key_map, lycoris_type)
 
             # Apply patches to models
             new_model = model
